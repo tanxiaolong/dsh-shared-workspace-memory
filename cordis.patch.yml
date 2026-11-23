@@ -1,0 +1,12 @@
+# dsh-shared-workspace-memory bundle layer.
+#
+# One Host row. The browser half is discovered from this package's package.json
+# `dsh.client` declaration, so no second row is needed.
+- insert:
+    - id: workspace-memory
+      name: dsh-shared-workspace-memory
+      config:
+        root: ~/work/knowledge
+        binDir: ~/.local/bin
+        injectIndex: true
+        installCli: true

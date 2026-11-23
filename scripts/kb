@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# dsh-shared-workspace-memory:kb — search the shared knowledge base (installed by the dsh-shared-workspace-memory plugin)
+#
+#   由 dsh-shared-workspace-memory 插件安装，卸载时用 `kb --uninstall`（或插件设置页）移除。
+set -u
+VERSION="__KB_VERSION__"
+KB="${KB_HOME:-$HOME/work/knowledge}"
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+MANIFEST="$(dirname "$SELF")/.dsh-shared-workspace-memory-kb.json"
+
+usage() {
+  cat <<EOF
+kb $VERSION — 共享知识库
+
+  kb                        列出知识库所有文件
+  kb <关键词...>            检索（多个词为 OR，命令行下命中处高亮）
+  kb --path                 打印知识库路径
+  kb --version              版本
+  kb --uninstall [--purge]  卸载：删掉 kb 命令本身；加 --purge 连知识库内容一起删
+EOF
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  --version) printf 'kb %s\n' "$VERSION"; exit 0 ;;
+  --path) printf '%s\n' "$KB"; exit 0 ;;
+  --uninstall)
+    purge=0
+    [ "${2:-}" = "--purge" ] && purge=1
+    printf '将删除命令：%s\n' "$SELF"
+    if [ "$purge" = 1 ]; then
+      printf '并删除知识库内容：%s\n' "$KB"
+      printf '确认请输入 yes：'
+      read -r answer
+      [ "$answer" = "yes" ] || { printf '已取消\n'; exit 1; }
+    fi
+    rm -f "$SELF" "$MANIFEST"
+    [ "$purge" = 1 ] && rm -rf "$KB"
+    printf '已清理完毕。\n'
+    exit 0 ;;
+esac
+
+if [ ! -d "$KB" ]; then
+  printf 'kb: 知识库不存在：%s\n' "$KB" >&2
+  exit 1
+fi
+
+if [ $# -eq 0 ]; then
+  ( cd "$KB" && find . -name '*.md' -type f | sed 's|^\./||' | sort )
+  exit 0
+fi
+
+# 终端里高亮命中关键词，管道/重定向到文件时保持纯文本（方便 agent 解析）。
+if [ -t 1 ]; then
+  COLOR=always
+else
+  COLOR=never
+fi
+
+pattern=$(printf '%s' "$*" | tr ' ' '|')
+hits=$(grep -rIniE --color="$COLOR" -- "$pattern" "$KB" --include='*.md' 2>/dev/null | head -40)
+if [ -z "$hits" ]; then
+  printf 'kb: 没有匹配：%s\n' "$*" >&2
+  exit 2
+fi
+printf '%s\n' "$hits" | sed "s|$KB/||"

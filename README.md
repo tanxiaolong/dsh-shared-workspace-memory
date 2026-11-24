@@ -30,6 +30,12 @@
 ## 2. 安装
 
 ```bash
+# 从 npm 安装（推荐）
+plugin_manager install_bundle target=dsh-shared-workspace-memory
+
+# 或者指定版本
+plugin_manager install_bundle target=dsh-shared-workspace-memory@0.2.2
+
 # 本地目录安装（开发态）
 plugin_manager install_bundle target=file:/path/to/dsh-shared-workspace-memory
 ```
@@ -59,7 +65,7 @@ plugin_manager install_bundle target=file:/path/to/dsh-shared-workspace-memory
 kb                      # 列出知识库所有文件
 kb 帧 压缩               # 检索，多个词 OR；终端里命中处高亮
 kb --path               # 打印知识库路径
-kb --version            # kb 0.2.0
+kb --version            # kb 0.2.2
 kb --uninstall          # 只删 kb 命令本身（保留知识库）
 kb --uninstall --purge  # 连知识库内容一起删（要求输入 yes 确认）
 ```
@@ -82,7 +88,13 @@ kb --uninstall --purge  # 连知识库内容一起删（要求输入 yes 确认�
 2. 截断到 `maxIndexChars`；
 3. 拼上路径、文件清单和四条使用规则，作为 `knowledge-base` 段（`order: 900`）注入。
 
-`INDEX.md` 的 mtime 变化才重算，改完下一轮就生效，**不需要重启**。
+`text()` 必须同步返回，所以它给出的是**上一次渲染的结果**，同时在后台检查一次：
+
+- `INDEX.md` 的 mtime 变了 → 重算（关键词表是注入的主体）；
+- 距上次渲染超过 30 秒 → 也重算一次，这样**新增文件**即使没动 `INDEX.md` 也会出现在「现有文件」那行里；
+- 检查被节流到每 1 秒最多一次 `stat`，并且并发调用共用同一次渲染。
+
+效果：改完 `INDEX.md` 或加一个新文件，**下一轮对话就生效，不需要重启**（0.2.2 起；0.2.1 及更早是进程内冻结的，只能重启）。
 
 注入的段落长这样（节选）：
 
@@ -205,5 +217,23 @@ kb --uninstall --purge  # 连知识库内容一起删（要求输入 yes 确认�
 - 注入的是**索引摘要**，具体内容仍需 `kb_read` 读文件。
 - `INDEX.md` 很大时索引会占 token，用 `maxIndexChars` 控制。
 - 只支持 Markdown；不支持 PDF/图片检索。
+- 注入的是**索引**，`INDEX.md` 写得过长会被截断，正文永远靠工具/命令读。
+
+---
+
+## 13. 变更记录
+
+### 0.2.2
+
+- **修复启动崩溃**：`client.js` 现在导出 `inject: ['slots', 'locale']`。此前它直接访问 `ctx.slots` 却未声明注入，Cordis 会抛 `cannot get property "slots" without inject`，整个 Web 客户端在启动阶段崩溃（表现为桌面端「The desktop host stopped」）。注册失败现在也只警告，不再影响启动。
+- **修复注入块冻结**：`lib/kb.js` 新增 `createPromptCache`，`text()` 每次返回上次渲染结果并在后台检查 `INDEX.md` 的 mtime 与 30 秒时效，改动或新增文件后下一轮即可见，不必重启。
+
+
+| 版本 | 变更 |
+|---|---|
+| 0.2.2 | 修复注入块「进程内冻结」：`text()` 现在会后台刷新（INDEX.md mtime + 最长 30 秒兜底），改完下一轮生效；新增两条缓存单测（11/11） |
+| 0.2.1 | 改名 `dsh-shared-session-memory` → `dsh-shared-workspace-memory`，cordis 行 id 改为 `workspace-memory`；`INDEX.md` 去掉本机 workspace 名与绝对路径 |
+| 0.2.0 | 首次改名为 `dsh-shared-session-memory`；README 重写；旧 `kb` 清单/marker 兼容升级 |
+| 0.1.0 | 首个可安装版本（当时叫 `dsh-knowledge`） |
 
 MIT License.

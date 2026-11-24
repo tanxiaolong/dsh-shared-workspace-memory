@@ -26,7 +26,7 @@ import { installCli, removeCli } from './lib/install.js';
 export const name = 'dsh-shared-workspace-memory';
 export const inject = ['tools', 'commands', 'webServer'];
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 const PREFIX = '/api/dsh-shared-workspace-memory';
 const MAX_BODY = 256 * 1024;
 const PROMPT_SECTION = 'knowledge-base';
@@ -191,6 +191,11 @@ export function apply(ctx, config) {
 
   /* ---------------------------------------------------------- system prompt */
 
+  // The prompt section must answer synchronously, so the cache returns the last render
+  // and re-renders in the background: INDEX.md edits (or a new file, checked every
+  // 30 s) therefore reach the next prompt assembly without a restart.
+  const promptCache = kb.createPromptCache({ root: cfg.root, maxChars: cfg.maxIndexChars });
+
   if (cfg.injectIndex) {
     ctx.inject(['systemPrompt'], (scoped) =>
       scoped.effect(
@@ -199,32 +204,14 @@ export function apply(ctx, config) {
             name: PROMPT_SECTION,
             order: cfg.order,
             interpolate: false,
-            text: () => {
-              try {
-                return promptText;
-              } catch {
-                return '';
-              }
-            },
+            text: () => promptCache.text(),
           }),
         'dsh-shared-workspace-memory: system prompt section',
       ),
     );
   }
 
-  // Rendered once at load and refreshed lazily so edits show up on the next assembly.
-  let promptText = '';
-  let promptStamp = 0;
-  const refreshPrompt = async () => {
-    if (!cfg.injectIndex) return;
-    const indexFile = path.join(cfg.root, 'INDEX.md');
-    const { mtimeMs } = await import('node:fs/promises').then((fs) => fs.stat(indexFile).catch(() => ({ mtimeMs: 0 })));
-    if (mtimeMs !== promptStamp) {
-      promptText = await kb.promptBlock(cfg.root, cfg.maxIndexChars).catch(() => '');
-      promptStamp = mtimeMs;
-    }
-  };
-  prepared.then(refreshPrompt).catch(() => undefined);
+  prepared.then(() => promptCache.refresh({ force: true })).catch(() => undefined);
 
   /* ----------------------------------------------------------------- tools */
 

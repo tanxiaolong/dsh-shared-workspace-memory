@@ -242,20 +242,33 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       console.info('[dsh-shared-workspace-memory] client apply');
+
+      // Every service touched below must be listed in `inject`; Cordis throws
+      // `cannot get property "<name>" without inject` on any undeclared access.
       try {
         if (typeof ctx.locale?.register === 'function') ctx.locale.register(NS, { zh, en });
       } catch (error) {
         console.warn(`[dsh-shared-workspace-memory] locale registration failed: ${error?.message ?? error}`);
       }
 
-      ctx.slots.inject('plugins.row.config', () =>
-        ctx.slots.register(
-          { name: 'plugins.row.config', key: PLUGIN_PAGE_KEY },
-          ({ view }) => (view === 'summary' ? '共享知识库' : h(KnowledgePage)),
-        ),
-      );
+      try {
+        ctx.slots.inject('plugins.row.config', () =>
+          ctx.slots.register(
+            { name: 'plugins.row.config', key: PLUGIN_PAGE_KEY },
+            ({ view }) => (view === 'summary' ? '共享知识库' : h(KnowledgePage)),
+          ),
+        );
+      } catch (error) {
+        // A missing slot must never take the whole web client down.
+        console.warn(`[dsh-shared-workspace-memory] settings page not registered: ${error?.message ?? error}`);
+      }
     }
 
-    return { name: 'dsh-shared-workspace-memory', description: 'Shared knowledge base with an auto-injected index.', apply };
+    return {
+      name: 'dsh-shared-workspace-memory',
+      description: 'Shared knowledge base with an auto-injected index.',
+      inject: ['slots', 'locale'],
+      apply,
+    };
   },
 });

@@ -107,3 +107,49 @@ test('shipped scaffold templates carry no machine-specific paths or workspace na
     assert.ok(!text.includes('tanxiaolong'), `${file} must not embed author details`);
   }
 });
+
+test('the prompt cache re-renders when INDEX.md changes and when a file appears', async () => {
+  const root = await tempDir('kb-cache-');
+  await kb.ensureScaffold(root);
+  const cache = kb.createPromptCache({ root, maxChars: 400, minIntervalMs: 0, maxAgeMs: 0 });
+
+  await cache.refresh({ force: true });
+  assert.match(cache.text(), /共享知识库/u);
+
+  // Rewrite the keyword section: the next forced refresh must pick it up.
+  await fs.writeFile(
+    path.join(root, 'INDEX.md'),
+    '# 索引\n\n## 关键词索引\n\n| 关键词 | 去哪 |\n|---|---|\n| 缓存哨兵 | lessons/cache.md |\n',
+  );
+  await cache.refresh({ force: true });
+  assert.match(cache.text(), /缓存哨兵/u);
+
+  // A brand new file has to show up in the "现有文件" line without touching INDEX.md.
+  await kb.appendLine(root, 'lessons/cache.md', '新文件应当出现在注入块的清单里', { date: '2026-11-24' });
+  await cache.refresh({ force: true });
+  assert.match(cache.text(), /lessons\/cache\.md/u);
+});
+
+test('the prompt cache throttle avoids re-reading on every call', async () => {
+  const root = await tempDir('kb-throttle-');
+  await kb.ensureScaffold(root);
+  const cache = kb.createPromptCache({ root, minIntervalMs: 60_000, maxAgeMs: 60_000 });
+  const first = await cache.refresh({ force: true });
+  const again = await cache.refresh();
+  assert.equal(again, first);
+  assert.equal(cache.text(), first);
+});
+
+test('client bundle declares every service it touches in inject', async () => {
+  const source = await fs.readFile(new URL('../client.js', import.meta.url), 'utf8');
+  const match = source.match(/inject:\s*\[([^\]]*)\]/);
+  assert.ok(match, 'client.js must export an inject list');
+  const declared = match[1].split(',').map((part) => part.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+  assert.ok(declared.includes('slots'), 'slots must be declared in inject');
+  assert.ok(declared.includes('locale'), 'locale must be declared in inject');
+  // Guard against regressions: the apply body must not touch services it does not declare.
+  for (const service of ['slots', 'locale']) {
+    assert.ok(source.includes(`ctx.${service}`), `expected ctx.${service} usage to be covered by the inject list`);
+  }
+  assert.ok(!/ctx\.(remote|sessions|workspaces)\b/.test(source), 'client must not reach for undeclared services');
+});

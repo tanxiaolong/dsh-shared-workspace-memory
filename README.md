@@ -164,12 +164,14 @@ kb --uninstall --purge  # 连知识库内容一起删（要求输入 yes 确认�
 
 | 现象 | 先查 |
 |---|---|
-| 新会话里看不到注入段 | `curl .../api/dsh-shared-workspace-memory/status` 看 `injectIndex` 与字符数；再确认 `INDEX.md` 有「关键词索引」小节 |
+| 新会话里看不到注入段 | 会话内 `/kb status` 看 `injectIndex` 与字符数（命令行 `curl` 会因缺登录 cookie 返回 401）；再确认 `INDEX.md` 有「关键词索引」小节 |
 | 注入段在，但 agent 不查 | 看系统提示里那段的使用规则是否被别的指令覆盖；`kb_search` 工具是否出现在工具表 |
 | `kb: command not found` | `echo $PATH` 是否含 `~/.local/bin`；或设置页点「重新安装 kb」 |
 | 终端不显示颜色 | 只有 tty 才高亮，`kb x \| cat` 是刻意去色的 |
-| 设置页打不开 | 页面 key 是 `<包名>#<cordis.patch.yml 的 id>`，即 `dsh-shared-workspace-memory#memory` —— 三者任一改了都要同步 |
-| bridge 返回 401/404 | 走的是 Host 的同源 + loopback 守卫；必须从 GUI 同源访问，不能从别的站点 fetch |
+| 设置页打不开 | 页面 key 是 `<包名>#<cordis.patch.yml 的 id>`，即 `dsh-shared-workspace-memory#workspace-memory` —— 三者任一改了都要同步 |
+| bridge 返回 401 | 被 **DSH 准入**拦下：请求没有登录 cookie（`curl`、隐身窗口、别的站点发起）。从 DSH 界面里访问；命令行请用 `/kb status` |
+| bridge 返回 403 | Host/Origin 围栏或本插件同源校验拦下：跨站 fetch、`Origin` 与 `Host` 不一致、或非 loopback 来源 |
+| bridge 返回 404 | 路径前缀不对（`/api/dsh-shared-workspace-memory`），或插件未启用 |
 
 ---
 
@@ -177,8 +179,25 @@ kb --uninstall --purge  # 连知识库内容一起删（要求输入 yes 确认�
 
 - **读**：`root` 下的 Markdown；`binDir` 下自己的清单。
 - **写**：`root` 下缺失的脚手架文件；`kb_append` 追加的行；`binDir` 下的 `kb` 与清单。**仅此。**
-- **网络**：无。HTTP 路由只监听 Host 已有的本地端口，且校验同源/loopback。
+- **网络**：无出网请求。HTTP 路由挂在 Host 已有的本地端口上，**先过 DSH 自己的准入**（见下），再叠加本插件的同源/loopback 校验。
 - **不**读写其它 workspace 的文件，不触碰 DSH 的会话日志、`workspace.json`、投影缓存。
+
+### HTTP 路由的访问控制
+
+`webServer.register` 本身不带准入——文档原话是「the caller admits the reader before reading」。所以每个 handler **第一件事**是问 DSH：
+
+```js
+const rejection = ctx.get('connection')?.requestRejection(request);
+if (rejection !== undefined) { response.statusCode = rejection; response.end(); return; }
+```
+
+| 情况 | 结果 |
+|---|---|
+| Host/Origin 围栏不过（DNS rebinding、浏览器跨站调用） | `403` |
+| 没有 DSH 登录 cookie，也没有附带的 API token | `401` |
+| 放行 | 继续走插件自己的同源 + loopback 校验 |
+
+`connection` 只在 Web 组装里存在；TUI 等没有 HTTP 服务的组装里这层自动跳过（用 `ctx.get('connection')` 探测，不写进 `inject`，否则非 Web 组装会加载失败），插件自己的校验仍然生效。判定过程抛错时按 `401` 失败关闭。
 
 ---
 
@@ -223,6 +242,12 @@ kb --uninstall --purge  # 连知识库内容一起删（要求输入 yes 确认�
 
 ## 13. 变更记录
 
+### 0.2.3
+
+- **接入 DSH 准入**：新增 `lib/admission.js`，每个 bridge handler 先调用 `connection.requestRejection(request)`，未通过直接回 `401`/`403`；插件自带的同源 + loopback 校验保留为第二层。
+- **收紧 `engines.dsh`**：原来是 `>=0.14.0`——那是 Desktop 应用版本号，对内核等于没有约束；改为 `>=0.2.2-rc.1`，即准入 API 所在的内核版本（Desktop 0.14.0 内置的正是 `0.2.2-rc.1`）。
+- 新增 9 条准入单测（`test/admission.test.mjs`），总计 21/21 通过。
+
 ### 0.2.2
 
 - **修复启动崩溃**：`client.js` 现在导出 `inject: ['slots', 'locale']`。此前它直接访问 `ctx.slots` 却未声明注入，Cordis 会抛 `cannot get property "slots" without inject`，整个 Web 客户端在启动阶段崩溃（表现为桌面端「The desktop host stopped」）。注册失败现在也只警告，不再影响启动。
@@ -231,6 +256,7 @@ kb --uninstall --purge  # 连知识库内容一起删（要求输入 yes 确认�
 
 | 版本 | 变更 |
 |---|---|
+| 0.2.3 | 接入 DSH 准入（`connection.requestRejection`），收紧 `engines.dsh`；准入单测 9 条（21/21） |
 | 0.2.2 | 修复注入块「进程内冻结」：`text()` 现在会后台刷新（INDEX.md mtime + 最长 30 秒兜底），改完下一轮生效；新增两条缓存单测（11/11） |
 | 0.2.1 | 改名 `dsh-shared-session-memory` → `dsh-shared-workspace-memory`，cordis 行 id 改为 `workspace-memory`；`INDEX.md` 去掉本机 workspace 名与绝对路径 |
 | 0.2.0 | 首次改名为 `dsh-shared-session-memory`；README 重写；旧 `kb` 清单/marker 兼容升级 |

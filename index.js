@@ -20,13 +20,14 @@ import path from 'node:path';
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
 
+import { admissionRejection } from './lib/admission.js';
 import * as kb from './lib/kb.js';
 import { installCli, removeCli } from './lib/install.js';
 
 export const name = 'dsh-shared-workspace-memory';
 export const inject = ['tools', 'commands', 'webServer'];
 
-const VERSION = '0.2.2';
+const VERSION = '0.2.3';
 const PREFIX = '/api/dsh-shared-workspace-memory';
 const MAX_BODY = 256 * 1024;
 const PROMPT_SECTION = 'knowledge-base';
@@ -327,6 +328,10 @@ export function apply(ctx, config) {
       kind: 'prefix',
       path: PREFIX,
       handler: async (request, response) => {
+        const rejection = admissionRejection(ctx, request);
+        if (rejection !== undefined) {
+          return sendJson(response, rejection, { ok: false, text: rejection === 403 ? 'forbidden' : 'unauthorized' });
+        }
         if (!requestAllowed(request)) return sendJson(response, 403, { ok: false, text: 'forbidden' });
         const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
         const operation = url.pathname.slice(PREFIX.length).replace(/^\/+/u, '');

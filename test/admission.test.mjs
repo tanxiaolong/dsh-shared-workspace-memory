@@ -73,5 +73,8 @@ test('the shipped bridge wires the fence before it touches the disk', async () =
     if (callAt < 0) continue;
     assert.ok(admissionAt < callAt, `admission must precede ${call}`);
   }
-  assert.match(source, /const VERSION = '0\.2\.3'/u);
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const declared = source.match(/const VERSION = '([^']+)'/u);
+  assert.ok(declared, 'index.js must declare VERSION');
+  assert.equal(declared[1], pkg.version, 'VERSION must track package.json');
 });

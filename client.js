@@ -15,7 +15,42 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    const BASE = '/api/dsh-shared-workspace-memory';
+    const DEFAULT_BASE = '/api/dsh-shared-workspace-memory';
+
+    /** The Host publishes its prefix as a boot global; fall back to the default path. */
+    function bridgeBase() {
+      const boot = globalThis.__DSH_KNOWLEDGE__;
+      if (boot !== null && typeof boot === 'object' && typeof boot.prefix === 'string' && boot.prefix.length > 0) {
+        return boot.prefix;
+      }
+      return DEFAULT_BASE;
+    }
+
+    /** One place that turns a network/HTTP failure into text worth showing the user. */
+    async function fetchJson(path, options) {
+      const url = bridgeBase() + path;
+      let response;
+      try {
+        response = await fetch(url, {
+          ...options,
+          credentials: 'same-origin',
+          signal: typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+            ? AbortSignal.timeout(15000)
+            : undefined,
+        });
+      } catch (error) {
+        throw new Error(`${url}: ${error?.message ?? error}`);
+      }
+      const text = await response.text();
+      let body;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        throw new Error(`${url}: HTTP ${response.status} ${text.slice(0, 160)}`);
+      }
+      if (!response.ok && body?.ok !== false) throw new Error(`${url}: HTTP ${response.status}`);
+      return body;
+    }
     const PLUGIN_PAGE_KEY = 'dsh-shared-workspace-memory#workspace-memory';
     const NS = 'knowledge';
 
@@ -125,14 +160,17 @@ window.__ModuleLoader__.load({
     };
 
     function KnowledgePage(props) {
-      const t = makeTranslator(props);
+      // Identities matter: a fresh translator on every render would make `load` a new
+      // function each time, re-fire the effect, and spin an endless fetch loop.
+      const language = typeof props?.locale?.language === 'string' ? props.locale.language : 'zh';
+      const t = React.useMemo(() => makeTranslator({ locale: { language } }), [language]);
+      const started = React.useRef(false);
       const [state, setState] = React.useState({ loading: true, data: undefined, message: '', busy: false, confirmPurge: false });
 
       const load = React.useCallback(async () => {
         setState((current) => ({ ...current, loading: true }));
         try {
-          const response = await fetch(`${BASE}/status`, { credentials: 'same-origin' });
-          const body = await response.json();
+          const body = await fetchJson('/status');
           setState((current) => ({ ...current, loading: false, data: body?.value, message: body?.ok === false ? t('error', { message: body.text }) : '' }));
         } catch (error) {
           setState((current) => ({ ...current, loading: false, message: t('error', { message: error?.message ?? error }) }));
@@ -140,19 +178,19 @@ window.__ModuleLoader__.load({
       }, [t]);
 
       React.useEffect(() => {
+        if (started.current) return;
+        started.current = true;
         load();
       }, [load]);
 
       const call = async (path, payload) => {
         setState((current) => ({ ...current, busy: true, message: '' }));
         try {
-          const response = await fetch(`${BASE}/${path}`, {
+          const body = await fetchJson(`/${path}`, {
             method: 'POST',
-            credentials: 'same-origin',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(payload ?? {}),
           });
-          const body = await response.json();
           setState((current) => ({ ...current, busy: false, confirmPurge: false, message: body?.ok === false ? t('error', { message: body.text }) : t('done', { text: body.text }) }));
           await load();
         } catch (error) {

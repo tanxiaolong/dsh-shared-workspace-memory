@@ -34,7 +34,7 @@
 plugin_manager install_bundle target=dsh-shared-workspace-memory
 
 # 或者指定版本
-plugin_manager install_bundle target=dsh-shared-workspace-memory@0.2.2
+plugin_manager install_bundle target=dsh-shared-workspace-memory@0.2.5
 
 # 本地目录安装（开发态）
 plugin_manager install_bundle target=file:/path/to/dsh-shared-workspace-memory
@@ -65,7 +65,7 @@ plugin_manager install_bundle target=file:/path/to/dsh-shared-workspace-memory
 kb                      # 列出知识库所有文件
 kb 帧 压缩               # 检索，多个词 OR；终端里命中处高亮
 kb --path               # 打印知识库路径
-kb --version            # kb 0.2.2
+kb --version            # kb 0.2.5
 kb --uninstall          # 只删 kb 命令本身（保留知识库）
 kb --uninstall --purge  # 连知识库内容一起删（要求输入 yes 确认）
 ```
@@ -242,6 +242,17 @@ if (rejection !== undefined) { response.statusCode = rejection; response.end(); 
 
 ## 13. 变更记录
 
+### 0.2.5
+
+- **修复设置页的渲染循环（严重）**：`client.js` 里 `t = makeTranslator(props)` 每次渲染都返回新函数，而 `load` 的 `useCallback` 依赖它、`useEffect` 又依赖 `load`，于是一轮轮自我触发，秒级发出上百次 `/status` 请求。每个请求都会在 Host 里真的读一遍知识库目录，最终把 Host 的 fd 推到 1 万以上（实测 11 959 / 15 320），越过 macOS 的 `OPEN_MAX = 10240`，`spawn` 开始报 `EBADF`，任何用子进程的插件（例如定时 `ps` 采样的诊断插件）都会因此抛未捕获异常并**让整个 Host 退出**，同时渲染进程被钉死、输入法切不动。修法：`useMemo` 稳定翻译器身份 + `useRef` 守卫首载；另加两条回归测试（翻译器必须 memo、`fetch` 只许出现在 helper 里）。
+- **桥接可观测**：每个请求写一行 `~/Library/Logs/DSH Desktop/knowledge-bridge.log`，含 `pid`、`method`、`status`、耗时和当时进程的 fd 数；handler 整体包 `try/catch`，异常回 500 并落盘堆栈，不再让请求悬空。
+- **前缀不再写死**：通过 `webserver/index-inject` 发布 `window.__DSH_KNOWLEDGE__.prefix`，客户端优先读它，退化时仍用 `/api/dsh-shared-workspace-memory`。
+- 客户端请求统一走 `fetchJson()`：15 秒超时，错误信息带 URL 与 HTTP 状态或响应片段。
+
+### 0.2.4
+
+- 未单独发布（内部版本号）：在 0.2.5 里一并交付——桥接日志、`try/catch`、`fetchJson`、引导全局前缀都是这一版写的。
+
 ### 0.2.3
 
 - **接入 DSH 准入**：新增 `lib/admission.js`，每个 bridge handler 先调用 `connection.requestRejection(request)`，未通过直接回 `401`/`403`；插件自带的同源 + loopback 校验保留为第二层。
@@ -256,6 +267,7 @@ if (rejection !== undefined) { response.statusCode = rejection; response.end(); 
 
 | 版本 | 变更 |
 |---|---|
+| 0.2.5 | 修复设置页渲染循环（曾把 Host 的 fd 推到 1.2 万，触发 `spawn EBADF` 连锁退出）；桥接日志、`try/catch`、`fetchJson`、引导全局前缀；23/23 |
 | 0.2.3 | 接入 DSH 准入（`connection.requestRejection`），收紧 `engines.dsh`；准入单测 9 条（21/21） |
 | 0.2.2 | 修复注入块「进程内冻结」：`text()` 现在会后台刷新（INDEX.md mtime + 最长 30 秒兜底），改完下一轮生效；新增两条缓存单测（11/11） |
 | 0.2.1 | 改名 `dsh-shared-session-memory` → `dsh-shared-workspace-memory`，cordis 行 id 改为 `workspace-memory`；`INDEX.md` 去掉本机 workspace 名与绝对路径 |

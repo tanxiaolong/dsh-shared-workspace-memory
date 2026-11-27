@@ -16,6 +16,8 @@
  * caller explicitly asks for it.
  */
 
+import { appendFileSync, readdirSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { defineTool } from '@deepseek-ai/dsh-tools';
@@ -27,9 +29,28 @@ import { installCli, removeCli } from './lib/install.js';
 export const name = 'dsh-shared-workspace-memory';
 export const inject = ['tools', 'commands', 'webServer'];
 
-const VERSION = '0.2.3';
+const VERSION = '0.2.5';
 const PREFIX = '/api/dsh-shared-workspace-memory';
 const MAX_BODY = 256 * 1024;
+const BRIDGE_LOG = path.join(os.homedir(), 'Library', 'Logs', 'DSH Desktop', 'knowledge-bridge.log');
+
+/** fds the host process currently holds — the number that made `spawn` fail with EBADF. */
+function countFds() {
+  try {
+    return readdirSync('/dev/fd').length;
+  } catch {
+    return -1;
+  }
+}
+
+/** Append one line per bridge hit; survives a crash and shows whether a request ever landed. */
+function bridgeLog(fields) {
+  try {
+    appendFileSync(BRIDGE_LOG, `${new Date().toISOString()} pid=${process.pid} ${JSON.stringify(fields)}\n`);
+  } catch {
+    /* logging must never break a request */
+  }
+}
 const PROMPT_SECTION = 'knowledge-base';
 const USAGE = 'status | search <关键词> | add <文件> <内容> | scaffold | cleanup [--purge]';
 
@@ -328,29 +349,58 @@ export function apply(ctx, config) {
       kind: 'prefix',
       path: PREFIX,
       handler: async (request, response) => {
-        const rejection = admissionRejection(ctx, request);
-        if (rejection !== undefined) {
-          return sendJson(response, rejection, { ok: false, text: rejection === 403 ? 'forbidden' : 'unauthorized' });
-        }
-        if (!requestAllowed(request)) return sendJson(response, 403, { ok: false, text: 'forbidden' });
-        const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
-        const operation = url.pathname.slice(PREFIX.length).replace(/^\/+/u, '');
-        if (request.method === 'GET') {
-          if (operation === '' || operation === 'status') {
-            const outcome = await status();
-            return sendJson(response, 200, outcome);
+        const startedAt = Date.now();
+        const method = String(request.method ?? 'GET').toUpperCase();
+        const target = String(request.url ?? '/');
+        const fdsAtEntry = countFds();
+        const journal = (fields) => bridgeLog({ method, target, fds: fdsAtEntry, ms: Date.now() - startedAt, ...fields });
+        try {
+          const rejection = admissionRejection(ctx, request);
+          if (rejection !== undefined) {
+            journal({ status: rejection, note: 'admission' });
+            return sendJson(response, rejection, { ok: false, text: rejection === 403 ? 'forbidden' : 'unauthorized' });
           }
-          if (operation === 'search') {
-            const outcome = await run({ action: 'search', query: url.searchParams.get('q') ?? '' });
-            return sendJson(response, outcome.ok ? 200 : 400, outcome);
+          if (!requestAllowed(request)) {
+            journal({ status: 403, note: 'origin-guard' });
+            return sendJson(response, 403, { ok: false, text: 'forbidden' });
           }
-          return sendJson(response, 404, { ok: false, text: 'not found' });
+          const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
+          const operation = url.pathname.slice(PREFIX.length).replace(/^\/+/u, '');
+          if (method === 'GET') {
+            if (operation === '' || operation === 'status') {
+              const outcome = await status();
+              journal({ status: 200, note: 'status', files: outcome?.value?.files?.length });
+              return sendJson(response, 200, outcome);
+            }
+            if (operation === 'search') {
+              const outcome = await run({ action: 'search', query: url.searchParams.get('q') ?? '' });
+              journal({ status: outcome.ok ? 200 : 400, note: 'search' });
+              return sendJson(response, outcome.ok ? 200 : 400, outcome);
+            }
+            journal({ status: 404, note: 'not-found' });
+            return sendJson(response, 404, { ok: false, text: 'not found' });
+          }
+          if (method !== 'POST') {
+            journal({ status: 405, note: 'method' });
+            return sendJson(response, 405, { ok: false, text: 'method not allowed' });
+          }
+          const body = await readJsonBody(request);
+          if (body === undefined || typeof body !== 'object') {
+            journal({ status: 400, note: 'bad-body' });
+            return sendJson(response, 400, { ok: false, text: 'invalid JSON body' });
+          }
+          const outcome = await run({ ...body, action: typeof body.action === 'string' && body.action.length > 0 ? body.action : operation });
+          journal({ status: outcome.ok ? 200 : 400, note: 'run', action: body.action ?? operation });
+          return sendJson(response, outcome.ok ? 200 : 400, outcome);
+        } catch (error) {
+          journal({ status: 500, note: 'exception', error: String(error?.stack ?? error) });
+          try {
+            sendJson(response, 500, { ok: false, text: String(error?.message ?? error) });
+          } catch {
+            /* the socket may already be gone */
+          }
+          return undefined;
         }
-        if (request.method !== 'POST') return sendJson(response, 405, { ok: false, text: 'method not allowed' });
-        const body = await readJsonBody(request);
-        if (body === undefined || typeof body !== 'object') return sendJson(response, 400, { ok: false, text: 'invalid JSON body' });
-        const outcome = await run({ ...body, action: typeof body.action === 'string' && body.action.length > 0 ? body.action : operation });
-        return sendJson(response, outcome.ok ? 200 : 400, outcome);
       },
     },
   ];
@@ -364,8 +414,18 @@ export function apply(ctx, config) {
         registered.add(route.path);
         disposers.push(scoped.webServer.register(route));
       }
+      // Publish the bridge prefix as a browser global so the page never guesses it.
+      let offInject;
+      try {
+        offInject = scoped.on('webserver/index-inject', (table) => {
+          table.push({ kind: 'global', name: '__DSH_KNOWLEDGE__', value: { prefix: PREFIX, version: VERSION } });
+        });
+      } catch {
+        offInject = undefined;
+      }
       return () => {
         for (const dispose of disposers) if (typeof dispose === 'function') dispose();
+        if (typeof offInject === 'function') offInject();
         registered.clear();
       };
     }, 'dsh-shared-workspace-memory: HTTP bridge');
